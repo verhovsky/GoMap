@@ -682,7 +682,7 @@ final class EditorMapLayer: CALayer {
 		// Area
 		if (object.isWay()?.isArea() ?? false) || (object.isRelation()?.isMultipolygon() ?? false) {
 			if let areaColor = renderInfo.areaColor,
-			   !object.isCoastline()
+			   !object.isShoreline()
 			{
 				var refPoint = OSMPoint.zero
 				let path = object.shapePathForObject(withRefPoint: &refPoint)

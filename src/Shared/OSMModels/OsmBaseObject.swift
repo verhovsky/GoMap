@@ -239,9 +239,8 @@ class OsmBaseObject: NSObject, NSCoding, NSCopying {
 		return false
 	}
 
-	func isCoastline() -> Bool {
-		let natural = tags["natural"]
-		if let natural = natural {
+	func isShoreline() -> Bool {
+		if let natural = tags["natural"] {
 			if natural == "coastline" {
 				return true
 			}
