@@ -11,10 +11,9 @@ import Foundation
 
 final class MapMarkerDatabase: NSObject {
 	private let workQueue = OperationQueue()
-	private var _keepRightIgnoreList: [Int: Bool]? // FIXME: Use UserDefaults for storage so this becomes non-optional
-	private var noteForTag: [Int: MapMarker] = [:] // return the note with the given button tag (tagId)
+	private var keepRightIgnoreList: [Int: Bool]? // FIXME: Use UserDefaults for storage so this becomes non-optional
+	private var markerForTag: [Int: MapMarker] = [:] // return the note with the given button tag (tagId)
 	private var tagForKey: [String: Int] = [:]
-	weak var mapData: OsmMapData!
 
 	override init() {
 		super.init()
@@ -23,7 +22,7 @@ final class MapMarkerDatabase: NSObject {
 
 	func reset() {
 		workQueue.cancelAllOperations()
-		noteForTag.removeAll()
+		markerForTag.removeAll()
 		tagForKey.removeAll()
 	}
 
@@ -34,56 +33,78 @@ final class MapMarkerDatabase: NSObject {
 		let newTag = newNote.buttonId
 		if let oldTag = tagForKey[key] {
 			// remove any existing tag with the same key
-			noteForTag.removeValue(forKey: oldTag)
+			markerForTag.removeValue(forKey: oldTag)
 		}
 		tagForKey[key] = newTag
-		noteForTag[newTag] = newNote
+		markerForTag[newTag] = newNote
 	}
 
-	func updateMarkers(forRegion box: OSMRect, fixmeData mapData: OsmMapData, completion: @escaping () -> Void) {
-		let url = OSM_API_URL +
-			"api/0.6/notes?closed=0&bbox=\(box.origin.x),\(box.origin.y),\(box.origin.x + box.size.width),\(box.origin.y + box.size.height)"
-		if let url1 = URL(string: url) {
-			URLSession.shared.data(with: url1, completionHandler: { [self] result in
-				guard case let .success(data) = result,
-				      let xmlText = String(data: data, encoding: .utf8),
-				      let xmlDoc = try? DDXMLDocument(xmlString: xmlText, options: 0)
-				else { return }
+	func updateNoteMarkers(forRegion box: OSMRect, completion: @escaping () -> Void) {
+		let urlString = OSM_API_URL +
+			"api/0.6/notes?closed=0&bbox=\(box.origin.x),\(box.origin.y)," +
+			"\(box.origin.x + box.size.width),\(box.origin.y + box.size.height)"
+		guard let url = URL(string: urlString) else { return }
+		URLSession.shared.data(with: url, completionHandler: { [self] result in
+			guard case let .success(data) = result,
+			      let xmlText = String(data: data, encoding: .utf8),
+			      let xmlDoc = try? DDXMLDocument(xmlString: xmlText, options: 0)
+			else { return }
 
-				var newNotes: [OsmNoteMarker] = []
-				for noteElement in (try? xmlDoc.rootElement()?.nodes(forXPath: "./note")) ?? [] {
-					guard let noteElement = noteElement as? DDXMLElement else {
-						continue
-					}
-					if let note = OsmNoteMarker(noteXml: noteElement) {
-						newNotes.append(note)
-					}
+			var newNotes: [OsmNoteMarker] = []
+			for noteElement in (try? xmlDoc.rootElement()?.nodes(forXPath: "./note")) ?? [] {
+				guard let noteElement = noteElement as? DDXMLElement else {
+					continue
 				}
+				if let note = OsmNoteMarker(noteXml: noteElement) {
+					newNotes.append(note)
+				}
+			}
 
-				DispatchQueue.main.async(execute: { [self] in
-					// add downloaded notes
-					for note in newNotes {
-						addOrUpdate(note)
-					}
-
-					// add from FIXME=yes tags
-					mapData.enumerateObjects(inRegion: box, block: { [self] obj in
-						if let fixme = FixmeMarker.fixmeTag(obj) {
-							let marker = FixmeMarker(object: obj, text: fixme)
-							self.addOrUpdate(marker)
-						}
-
-#if DEBUG
-						for quest in QuestList.shared.questsForObject(obj) {
-							let marker = QuestMarker(object: obj, quest: quest)
-							self.addOrUpdate(marker)
-						}
-#endif
-					})
-
-					completion()
-				})
+			DispatchQueue.main.async(execute: { [self] in
+				// add downloaded notes
+				for note in newNotes {
+					addOrUpdate(note)
+				}
+				completion()
 			})
+		})
+	}
+
+	func updateFixmeMarkers(forRegion box: OSMRect, mapData: OsmMapData) {
+		// add from FIXME=yes tags
+		mapData.enumerateObjects(inRegion: box, block: { obj in
+			if let fixme = FixmeMarker.fixmeTag(obj) {
+				let marker = FixmeMarker(object: obj, text: fixme)
+				self.addOrUpdate(marker)
+			}
+		})
+	}
+
+	func updateQuestMarkers(forRegion box: OSMRect, mapData: OsmMapData) {
+		mapData.enumerateObjects(inRegion: box, block: { obj in
+			for quest in QuestList.shared.questsForObject(obj) {
+				let marker = QuestMarker(object: obj, quest: quest)
+				self.addOrUpdate(marker)
+			}
+		})
+	}
+
+	struct MapMarkerSet: OptionSet {
+		let rawValue: Int
+		static let notes = MapMarkerSet(rawValue: 1 << 0)
+		static let fixme = MapMarkerSet(rawValue: 1 << 1)
+		static let quest = MapMarkerSet(rawValue: 1 << 2)
+	}
+
+	func updateMarkers(forRegion box: OSMRect, mapData: OsmMapData, including: MapMarkerSet, completion: @escaping () -> Void) {
+		if including.isEmpty || including.contains(.notes) {
+			updateNoteMarkers(forRegion: box, completion: completion)
+		}
+		if including.isEmpty || including.contains(.fixme) {
+			updateFixmeMarkers(forRegion: box, mapData: mapData)
+		}
+		if including.isEmpty || including.contains(.quest) {
+			updateQuestMarkers(forRegion: box, mapData: mapData)
 		}
 	}
 
@@ -153,7 +174,8 @@ final class MapMarkerDatabase: NSObject {
 	func updateRegion(
 		_ bbox: OSMRect,
 		withDelay delay: CGFloat,
-		fixmeData mapData: OsmMapData,
+		mapData: OsmMapData,
+		including: MapMarkerSet,
 		completion: @escaping () -> Void)
 	{
 		workQueue.cancelAllOperations()
@@ -161,7 +183,7 @@ final class MapMarkerDatabase: NSObject {
 			usleep(UInt32(1000 * (delay + 0.25)))
 		})
 		workQueue.addOperation({ [self] in
-			updateMarkers(forRegion: bbox, fixmeData: mapData, completion: completion)
+			updateMarkers(forRegion: bbox, mapData: mapData, including: including, completion: completion)
 #if false
 			updateKeepRight(forRegion: bbox, mapData: mapData, completion: completion)
 #endif
@@ -169,7 +191,7 @@ final class MapMarkerDatabase: NSObject {
 	}
 
 	func enumerateNotes(_ callback: (_ note: MapMarker) -> Void) {
-		for note in noteForTag.values {
+		for note in markerForTag.values {
 			callback(note)
 		}
 	}
@@ -178,6 +200,7 @@ final class MapMarkerDatabase: NSObject {
 		note: OsmNoteMarker,
 		close: Bool,
 		comment: String,
+		mapData: OsmMapData,
 		completion: @escaping (Result<OsmNoteMarker, Error>) -> Void)
 	{
 		var allowedChars = CharacterSet.urlQueryAllowed
@@ -221,33 +244,33 @@ final class MapMarkerDatabase: NSObject {
 	}
 
 	func mapMarker(forTag tag: Int) -> MapMarker? {
-		return noteForTag[tag]
+		return markerForTag[tag]
 	}
 
 	// MARK: Ignore list
 
 	// FIXME: change this to just use non-optional _keepRightIgnoreList
 	func ignoreList() -> [Int: Bool] {
-		if _keepRightIgnoreList == nil {
+		if keepRightIgnoreList == nil {
 			let path = URL(fileURLWithPath: FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
 				.map(\.path).last ?? "").appendingPathComponent("keepRightIgnoreList").path
-			_keepRightIgnoreList = NSKeyedUnarchiver.unarchiveObject(withFile: path) as? [Int: Bool]
-			if _keepRightIgnoreList == nil {
-				_keepRightIgnoreList = [:]
+			keepRightIgnoreList = NSKeyedUnarchiver.unarchiveObject(withFile: path) as? [Int: Bool]
+			if keepRightIgnoreList == nil {
+				keepRightIgnoreList = [:]
 			}
 		}
-		return _keepRightIgnoreList!
+		return keepRightIgnoreList!
 	}
 
 	func ignore(_ note: MapMarker) {
-		if _keepRightIgnoreList == nil {
-			_keepRightIgnoreList = [:]
+		if keepRightIgnoreList == nil {
+			keepRightIgnoreList = [:]
 		}
-		_keepRightIgnoreList![note.buttonId] = true
+		keepRightIgnoreList![note.buttonId] = true
 
 		let path = URL(fileURLWithPath: FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
 			.map(\.path).last ?? "").appendingPathComponent("keepRightIgnoreList").path
-		NSKeyedArchiver.archiveRootObject(_keepRightIgnoreList!, toFile: path)
+		NSKeyedArchiver.archiveRootObject(keepRightIgnoreList!, toFile: path)
 	}
 
 	func isIgnored(_ note: MapMarker) -> Bool {

@@ -193,7 +193,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 		}
 	}
 
-	private(set) lazy var notesDatabase = MapMarkerDatabase()
+	private(set) lazy var mapMarkerDatabase = MapMarkerDatabase()
 	private(set) var buttonForButtonId: [Int: UIButton] = [:] // convert a note ID to a button on the map
 
 	private(set) lazy var aerialLayer = MercatorTileLayer(mapView: self)
@@ -716,7 +716,6 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			addGestureRecognizer(scrollWheelGesture)
 		}
 
-		notesDatabase.mapData = editorLayer.mapData
 		buttonForButtonId = [:]
 
 		// center button
@@ -782,7 +781,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			}
 
 			// get notes
-			updateNotesFromServer(withDelay: 0)
+			updateMapMarkersFromServer(withDelay: 0, including: [])
 		}
 	}
 
@@ -1248,7 +1247,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 
 		CATransaction.commit()
 
-		updateNotesFromServer(withDelay: 0)
+		updateMapMarkersFromServer(withDelay: 0, including: [])
 
 		// enable/disable editing buttons based on visibility
 		mainViewController.updateUndoRedoButtonState()
@@ -2235,11 +2234,11 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 
 	// MARK: Notes
 
-	func updateNotesFromServer(withDelay delay: CGFloat) {
+	func updateMapMarkersFromServer(withDelay delay: CGFloat, including: MapMarkerDatabase.MapMarkerSet) {
 		if viewOverlayMask.contains(.NOTES) {
 			let rc = screenLatLonRect()
-			notesDatabase.updateRegion(rc, withDelay: delay, fixmeData: editorLayer.mapData) { [self] in
-				refreshNoteButtonsFromDatabase()
+			mapMarkerDatabase.updateRegion(rc, withDelay: delay, mapData: editorLayer.mapData, including: including) {
+				self.refreshNoteButtonsFromDatabase()
 			}
 		} else {
 			refreshNoteButtonsFromDatabase()
@@ -2254,7 +2253,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 				// if a button is no longer in the notes database then it got resolved and can go away
 				var remove: [Int] = []
 				for tag in self.buttonForButtonId.keys {
-					if self.notesDatabase.mapMarker(forTag: tag) == nil {
+					if self.mapMarkerDatabase.mapMarker(forTag: tag) == nil {
 						remove.append(tag)
 					}
 				}
@@ -2266,11 +2265,11 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 				}
 
 				// update new and existing buttons
-				self.notesDatabase.enumerateNotes({ [self] note in
+				self.mapMarkerDatabase.enumerateNotes({ [self] note in
 					if self.viewOverlayMask.contains(.NOTES) {
 						// hide unwanted keep right buttons
 						if note is KeepRightMarker,
-						   self.notesDatabase.isIgnored(note)
+						   self.mapMarkerDatabase.isIgnored(note)
 						{
 							if let button = self.buttonForButtonId[note.buttonId] {
 								button.removeFromSuperview()
@@ -2332,14 +2331,14 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			})
 
 			if !viewOverlayMask.contains(.NOTES) {
-				notesDatabase.reset()
+				mapMarkerDatabase.reset()
 			}
 		})
 	}
 
 	@objc func noteButtonPress(_ sender: Any?) {
 		guard let button = sender as? UIButton,
-		      let marker = notesDatabase.mapMarker(forTag: button.tag)
+		      let marker = mapMarkerDatabase.mapMarker(forTag: button.tag)
 		else { return }
 
 		var object: OsmBaseObject?
@@ -2377,26 +2376,33 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			text = text.replacingOccurrences(of: "&quot;", with: "\"")
 
 			let alertKeepRight = UIAlertController(title: title, message: text, preferredStyle: .alert)
-			alertKeepRight
-				.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .cancel, handler: { _ in
-				}))
-			alertKeepRight
-				.addAction(UIAlertAction(title: NSLocalizedString("Ignore", comment: ""), style: .default,
-				                         handler: { [self] _ in
-				                         	// they want to hide this button from now on
-				                         	notesDatabase.ignore(marker)
-				                         	refreshNoteButtonsFromDatabase()
-				                         	editorLayer.selectedNode = nil
-				                         	editorLayer.selectedWay = nil
-				                         	editorLayer.selectedRelation = nil
-				                         	removePin()
-				                         }))
+			alertKeepRight.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""),
+			                                       style: .cancel,
+			                                       handler: { _ in
+			                                       }))
+			alertKeepRight.addAction(UIAlertAction(title: NSLocalizedString("Ignore", comment: ""),
+			                                       style: .default,
+			                                       handler: { [self] _ in
+			                                       	// they want to hide this button from now on
+			                                       	mapMarkerDatabase.ignore(marker)
+			                                       	refreshNoteButtonsFromDatabase()
+			                                       	editorLayer.selectedNode = nil
+			                                       	editorLayer.selectedWay = nil
+			                                       	editorLayer.selectedRelation = nil
+			                                       	removePin()
+			                                       }))
 			mainViewController.present(alertKeepRight, animated: true)
 		} else if let object = object {
 			// Fixme marker or Quest marker
 			if !editorLayer.isHidden {
 				if let marker = marker as? QuestMarker {
-					let vc = QuestEditorController.instantiate(quest: marker.quest, object: object)
+					let onClose = {
+						// Need to update the QuestMarker icon
+						self.updateMapMarkersFromServer(withDelay: 0.0, including: [.quest])
+					}
+					let vc = QuestEditorController.instantiate(quest: marker.quest,
+					                                           object: object,
+					                                           onClose: onClose)
 					mainViewController.present(vc, animated: true)
 				} else {
 					presentTagEditor(nil)
@@ -2514,7 +2520,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 					}
 				})
 			}
-			updateNotesFromServer(withDelay: CGFloat(duration))
+			updateMapMarkersFromServer(withDelay: CGFloat(duration), including: [])
 		} else if pan.state == .failed {
 			DLog("pan gesture failed")
 		} else {
@@ -2535,7 +2541,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			adjustZoom(by: pinch.scale, aroundScreenPoint: zoomCenter)
 			pinch.scale = 1.0
 		case .ended:
-			updateNotesFromServer(withDelay: 0)
+			updateMapMarkersFromServer(withDelay: 0, including: [])
 		default:
 			break
 		}
@@ -2553,7 +2559,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 			let zoomCenter = bounds.center()
 			adjustZoom(by: scale, aroundScreenPoint: zoomCenter)
 		} else if tapAndDrag.state == .ended {
-			updateNotesFromServer(withDelay: 0)
+			updateMapMarkersFromServer(withDelay: 0, including: [])
 		}
 	}
 
@@ -2633,7 +2639,7 @@ final class MapView: UIView, MapViewProgress, CLLocationManagerDelegate, UIActio
 					gpsState = .LOCATION
 				}
 			case .ended:
-				updateNotesFromServer(withDelay: 0)
+				updateMapMarkersFromServer(withDelay: 0, including: [])
 			default:
 				break // ignore
 			}
