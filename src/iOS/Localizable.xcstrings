@@ -3503,7 +3503,7 @@
       }
     },
     "%ld Days" : {
-      "comment" : "Plural number of days\nOne or more days",
+      "comment" : "One or more days\nPlural number of days",
       "localizations" : {
         "ar" : {
           "variations" : {
@@ -12536,7 +12536,7 @@
       }
     },
     "Area" : {
-      "comment" : "Object geometry: a closed way or multipolygon)\nArea of an object in m^2",
+      "comment" : "Area of an object in m^2\nObject geometry: a closed way or multipolygon)",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
